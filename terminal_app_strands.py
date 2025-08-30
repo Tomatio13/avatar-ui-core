@@ -101,6 +101,11 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+try:
+    # Textual >= 0.36 provides Center container for easy centering
+    from textual.containers import Center as CenterContainer  # type: ignore
+except Exception:
+    CenterContainer = None  # type: ignore
 from textual.widgets import Input, Static, RichLog
 from textual.reactive import reactive
 from textual.message import Message
@@ -123,6 +128,7 @@ try:
 except Exception:
     Pixels = None  # type: ignore
     RICH_PIXELS_AVAILABLE = False
+from rich.align import Align
 
 
 class LLMProvider:
@@ -626,7 +632,8 @@ class AvatarArt(Static):
         if not self._initialized or self.current_state != state or self._last_width != self.size.width:
             self.current_state = state
             renderable = self._generate_renderable(state)
-            self.update(renderable)
+            # 水平センタリング（ウィジェット幅を使う）
+            self.update(Align.center(renderable))
             self._initialized = True
             self._last_width = self.size.width
             
@@ -642,12 +649,14 @@ class AvatarDisplay(Container):
     
     def compose(self) -> ComposeResult:
         """アバター表示コンポーネント構築"""
-        yield Static(f"[b green]{settings.AVATAR_NAME.upper()}[/]", 
-                    classes="avatar-label")
-        
-        # ASCII Artアバターを作成
+        yield Static(f"[b green]{settings.AVATAR_NAME.upper()}[/]", classes="avatar-label")
+
+        # アバター本体（センタリング用のコンテナに内包）
         self.avatar_widget = AvatarArt(id="avatar-art", classes="avatar-art")
-        yield self.avatar_widget
+        if CenterContainer:
+            yield CenterContainer(self.avatar_widget, id="avatar-center")
+        else:
+            yield Container(self.avatar_widget, classes="avatar-center")
     
     def on_mount(self):
         """マウント時の初期化"""
@@ -719,6 +728,14 @@ class TerminalChatApp(App):
         width: 30%;
         padding: 1;
     }
+
+    /* アバターを水平・垂直センタリングするラッパー */
+    .avatar-center {
+        width: 100%;
+        height: 1fr;
+        align: center middle;            /* 子要素を中央寄せ */
+        content-align: center middle;    /* 一部のレイアウトでの保険 */
+    }
     
     .input-panel {
         background: black;
@@ -743,9 +760,10 @@ class TerminalChatApp(App):
     }
     
     .avatar-art {
-        padding: 1;
+        padding: 0;
         margin: 0;
-        text-align: center;
+        text-align: center;              /* 水平センタリング */
+        width: 100%;                     /* パネル幅に合わせる */
     }
     
     ChatInput {
