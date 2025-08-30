@@ -12,3 +12,5 @@ mcp
 Pillow
 rich>=13.7.0
 rich-pixels
+numpy
+pygame

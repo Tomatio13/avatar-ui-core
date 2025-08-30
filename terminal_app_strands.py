@@ -12,6 +12,7 @@ import os
 import re
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
+import time as _time
 
 # .envファイル読み込み
 load_dotenv()
@@ -137,6 +138,14 @@ except Exception:
     PILImage = None  # type: ignore
     PILImageEnhance = None  # type: ignore
     PIL_AVAILABLE = False
+
+# サウンド（タイプ音）
+try:
+    from sound_manager import SoundManager as PySoundManager  # 自作Python版
+    SOUND_AVAILABLE = True
+except Exception:
+    PySoundManager = None  # type: ignore
+    SOUND_AVAILABLE = False
 
 
 class LLMProvider:
@@ -896,6 +905,8 @@ class TerminalChatApp(App):
         super().__init__(**kwargs)
         self.is_processing = False
         self.llm_provider = None
+        self.sound_manager = None
+        self._last_beep_ts = 0.0
     
     def compose(self) -> ComposeResult:
         """UIコンポーネント構築"""
@@ -920,6 +931,14 @@ class TerminalChatApp(App):
             # LLMプロバイダの初期化（接続ログ抑止のためstdout/stderrともに抑止）
             with LogSuppressor(stdout=True, stderr=True):
                 self.llm_provider = LLMProvider()
+                # サウンド初期化（依存が無ければ自動的に無効）
+                if SOUND_AVAILABLE and PySoundManager is not None:
+                    try:
+                        self.sound_manager = PySoundManager(settings)
+                        # 初回安定化のため待機（ミキサーウォームアップ後）
+                        _time.sleep(0.05)
+                    except Exception:
+                        self.sound_manager = None
             
             # 初期化完了メッセージ
             provider_name = settings.LLM_PROVIDER
@@ -1060,6 +1079,16 @@ class TerminalChatApp(App):
                     started_talk = True
                 response_buffer += chunk
                 chat_history.update_streaming(response_buffer)
+                # タイプ音（AI応答が実際に表示されている間のみ）
+                if self.sound_manager and getattr(self.sound_manager, "is_enabled", lambda: False)():
+                    now = _time.monotonic()
+                    min_interval = max(0.03, (settings.BEEP_DURATION_MS or 50) / 1000.0 * 0.9)
+                    if now - self._last_beep_ts >= min_interval:
+                        try:
+                            self.sound_manager.play_type_sound()
+                            self._last_beep_ts = now
+                        except Exception:
+                            pass
                 self.refresh()
                 await asyncio.sleep(0)
             
