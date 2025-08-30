@@ -646,6 +646,8 @@ class AvatarDisplay(Container):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.avatar_widget = None
+        self._anim_task = None
+        self._talking = False
     
     def compose(self) -> ComposeResult:
         """アバター表示コンポーネント構築"""
@@ -666,9 +668,38 @@ class AvatarDisplay(Container):
             
     def set_talking(self, talking: bool):
         """発話状態の変更"""
+        # 状態が同じなら何もしない
+        if talking == self._talking:
+            return
+        self._talking = talking
         self.current_state = "talk" if talking else "idle"
-        if self.avatar_widget:
-            self.avatar_widget.set_state(self.current_state)
+
+        # 既存アニメーションを停止
+        if self._anim_task:
+            try:
+                self._anim_task.cancel()
+            except Exception:
+                pass
+            finally:
+                self._anim_task = None
+
+        if talking:
+            # 口パクアニメーション開始
+            async def _run_animation():
+                try:
+                    state_open = True
+                    interval = max(0.03, (settings.MOUTH_ANIMATION_INTERVAL_MS or 150) / 1000)
+                    while self._talking and self.avatar_widget:
+                        self.avatar_widget.set_state("talk" if state_open else "idle")
+                        state_open = not state_open
+                        await asyncio.sleep(interval)
+                except asyncio.CancelledError:
+                    pass
+            self._anim_task = asyncio.create_task(_run_animation())
+        else:
+            # 停止時は必ずidleに戻す
+            if self.avatar_widget:
+                self.avatar_widget.set_state("idle")
 
 
 class ChatInput(Input):
@@ -895,18 +926,17 @@ class TerminalChatApp(App):
         chat_history = self.query_one("#chat-history", ChatHistory)
         
         try:
-            # アバターを発話状態に
-            avatar_display.set_talking(True)
-            
-            # UI更新を確実にするため少し待機
-            await asyncio.sleep(0.02)
-            
             # ストリーミング応答の生成と表示（ChatHistory内部の1行を更新）
             response_buffer = ""
             chat_history.start_streaming(settings.AVATAR_NAME, "green", markdown=True)
+            started_talk = False
             async for chunk in self.llm_provider.generate_response_stream(user_message):
                 if not chunk:
                     continue
+                if not started_talk:
+                    # 実際にテキストが届いたタイミングで口パク開始
+                    avatar_display.set_talking(True)
+                    started_talk = True
                 response_buffer += chunk
                 chat_history.update_streaming(response_buffer)
                 self.refresh()
