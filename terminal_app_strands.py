@@ -129,6 +129,14 @@ except Exception:
     Pixels = None  # type: ignore
     RICH_PIXELS_AVAILABLE = False
 from rich.align import Align
+try:
+    from PIL import Image as PILImage
+    from PIL import ImageEnhance as PILImageEnhance
+    PIL_AVAILABLE = True
+except Exception:
+    PILImage = None  # type: ignore
+    PILImageEnhance = None  # type: ignore
+    PIL_AVAILABLE = False
 
 
 class LLMProvider:
@@ -444,6 +452,67 @@ class LLMProvider:
             # クリーンアップエラーは非表示化
             pass
 
+    def list_mcp_tools(self):
+        """現在接続中のMCPツール一覧を取得（server, name, description）"""
+        results = []
+        if not self.mcp_clients:
+            return results
+        from contextlib import ExitStack
+        
+        def _extract_name_desc(t):
+            # dict-like
+            if isinstance(t, dict):
+                name = t.get("name") or t.get("tool_name") or t.get("id") or "unknown"
+                desc = t.get("description") or ""
+                return str(name), str(desc)
+            # attribute-based (e.g., MCPAgentTool)
+            for attr in ("name", "tool_name", "id"):
+                if hasattr(t, attr):
+                    name_val = getattr(t, attr)
+                    if isinstance(name_val, (str, bytes)):
+                        name = name_val.decode() if isinstance(name_val, bytes) else name_val
+                        # description candidates
+                        desc = ""
+                        for d_attr in ("description", "desc", "summary"):
+                            if hasattr(t, d_attr):
+                                try:
+                                    d_val = getattr(t, d_attr)
+                                    desc = d_val if isinstance(d_val, str) else str(d_val)
+                                except Exception:
+                                    pass
+                                break
+                        return name, desc
+            # spec container
+            if hasattr(t, "spec"):
+                try:
+                    spec = getattr(t, "spec")
+                    name = getattr(spec, "name", None) or getattr(spec, "id", None) or "unknown"
+                    desc = getattr(spec, "description", "")
+                    return str(name), str(desc)
+                except Exception:
+                    pass
+            # string fallback
+            s = str(t)
+            return s, ""
+
+        with ExitStack() as stack:
+            active = {}
+            for name, client in self.mcp_clients.items():
+                try:
+                    stack.enter_context(client)
+                    active[name] = client
+                except Exception:
+                    continue
+            for server, client in active.items():
+                try:
+                    tools = client.list_tools_sync()
+                    for t in tools:
+                        tool_name, tool_desc = _extract_name_desc(t)
+                        results.append((server, tool_name, tool_desc))
+                except Exception:
+                    continue
+        return results
+
 class ChatHistory(RichLog):
     """チャット履歴表示エリア（行全体を再描画してストリーミングを行内更新）"""
     
@@ -520,6 +589,7 @@ class AvatarArt(Static):
         super().__init__(**kwargs)
         self.current_state = "idle"
         self.ascii_cache = {}  # キャッシュでパフォーマンス向上
+        self.image_cache = {}  # 前処理済み画像キャッシュ
         self._initialized = False  # 初期化フラグ
         self._last_width = None
         self.render_mode = "unknown"  # 'image' | 'ascii_magic' | 'fallback'
@@ -533,50 +603,55 @@ class AvatarArt(Static):
         except Exception:
             return 40
 
+    def _preprocess_image(self, image_path: str):
+        """50x50に縮小し軽くシャープをかけた画像を返す（PIL）。失敗時はNone。"""
+        if not PIL_AVAILABLE or not Path(image_path).exists():
+            return None
+        key = (image_path, 50, 50, 'nearest', 1.05)
+        if key in self.image_cache:
+            return self.image_cache[key]
+        try:
+            img = PILImage.open(image_path)
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            img = img.resize((50, 50), PILImage.NEAREST)
+            if PILImageEnhance is not None:
+                img = PILImageEnhance.Sharpness(img).enhance(1.05)
+            self.image_cache[key] = img
+            return img
+        except Exception:
+            return None
+
     def _generate_renderable(self, state: str):
-        """PNGがあればRichのImageで表示。無ければASCIIにフォールバック"""
-        # 画像ファイルパス
+        """PNGがあればRich/Pixelsで表示。無ければASCIIにフォールバック"""
         image_path = f"./static/images/{settings.AVATAR_IMAGE_IDLE if state == 'idle' else settings.AVATAR_IMAGE_TALK}"
 
-        # まずPNG表示（rich.image）を試す
-        if RICH_IMAGE_AVAILABLE and Path(image_path).exists():
+        # 1) 可能なら rich-pixels で前処理済み画像をそのまま描画（サイズ忠実）
+        if RICH_PIXELS_AVAILABLE and Path(image_path).exists():
             try:
-                cols = self._image_cols()
-                self.render_mode = "image"
-                self.last_error = None
-                return RichImage.from_file(image_path, width=cols)
+                pre = self._preprocess_image(image_path)
+                if pre is not None:
+                    self.render_mode = "image"
+                    self.last_error = None
+                    return Pixels.from_image(pre)
             except Exception:
-                # Pillow 未導入などのケースはASCIIへ
                 import traceback
                 self.last_error = traceback.format_exc(limit=1)
 
-        # rich-pixels があればそれを試す（より互換性の高いピクセル描画）
-        if RICH_PIXELS_AVAILABLE and Path(image_path).exists():
+        # 2) RichImage で描画（可能なら前処理済みPILを使い、追加スケールを避ける）
+        if RICH_IMAGE_AVAILABLE and Path(image_path).exists():
             try:
-                # メソッド名の互換対応
-                make = getattr(Pixels, "from_image_path", None) or getattr(Pixels, "from_image", None)
-                if make is None:
-                    raise RuntimeError("rich-pixels API not found")
-                # from_image は PIL.Image を受け取る可能性がある
-                if make.__name__ == "from_image":
-                    try:
-                        from PIL import Image as PILImage  # type: ignore
-                        img = PILImage.open(image_path)
-                        # 横幅をざっくり合わせる（列数に近づける）
-                        cols = self._image_cols()
-                        w, h = img.size
-                        if w > 0:
-                            new_w = max(20, min(120, cols * 2))
-                            new_h = max(10, int(h * (new_w / w)))
-                            img = img.resize((new_w, new_h))
-                        renderable = Pixels.from_image(img)
-                    except Exception:
-                        renderable = make(image_path)  # type: ignore[arg-type]
+                pre = self._preprocess_image(image_path)
+                if pre is not None and hasattr(RichImage, 'from_pil_image'):
+                    self.render_mode = "image"
+                    self.last_error = None
+                    # width を画像幅に合わせる（追加スケールを避ける）
+                    return RichImage.from_pil_image(pre, width=pre.size[0])
                 else:
-                    renderable = make(image_path)  # type: ignore[misc]
-                self.render_mode = "image"
-                self.last_error = None
-                return renderable
+                    cols = self._image_cols()
+                    self.render_mode = "image"
+                    self.last_error = None
+                    return RichImage.from_file(image_path, width=cols)
             except Exception:
                 import traceback
                 self.last_error = traceback.format_exc(limit=1)
@@ -904,6 +979,52 @@ class TerminalChatApp(App):
         chat_history = self.query_one("#chat-history", ChatHistory)
         chat_history.add_message("USER", user_message, "cyan")
         
+        # スラッシュコマンド処理
+        if user_message.startswith("/"):
+            cmd = user_message.strip().lower()
+            if cmd == "/clear":
+                # UIをクリアし、初期ステータスを再表示
+                chat_history.chat_lines = []
+                chat_history._render_all()
+                provider_name = settings.LLM_PROVIDER
+                connected = len(self.llm_provider.mcp_active_servers) if self.llm_provider else 0
+                configured = len(self.llm_provider.mcp_clients) if self.llm_provider else 0
+                mcp_status = (
+                    f"✓ ({connected} connected / {configured} configured)"
+                    if settings.MCP_ENABLED and self.llm_provider and self.llm_provider.strands_agent and connected > 0
+                    else "✗"
+                )
+                chat_history.add_system_message(
+                    f"{settings.AVATAR_FULL_NAME} オンライン | LLM: {provider_name} | MCP: {mcp_status}"
+                )
+                return
+            if cmd == "/mcp":
+                tools = []
+                if self.llm_provider:
+                    try:
+                        tools = self.llm_provider.list_mcp_tools()
+                    except Exception:
+                        tools = []
+                if tools:
+                    # Markdownで見やすく
+                    lines = ["利用可能なMCPツール:"]
+                    # グループ化（server毎）
+                    by_server = {}
+                    for server, name, desc in tools:
+                        by_server.setdefault(server, []).append((name, desc))
+                    for server, names in by_server.items():
+                        lines.append(f"- {server}")
+                        # 名前でソート
+                        for name, desc in sorted(names, key=lambda x: x[0]):
+                            if desc and desc.strip():
+                                lines.append(f"  - {name}: {desc}")
+                            else:
+                                lines.append(f"  - {name}")
+                    chat_history.add_message("SYSTEM", "\n".join(lines), markdown=True)
+                else:
+                    chat_history.add_system_message("MCPツールは見つかりませんでした")
+                return
+
         # 画面更新を強制して確実にユーザー入力を表示
         self.refresh()
         # より長い待機時間でUI更新を確実にする
