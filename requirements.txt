@@ -9,3 +9,6 @@ openai
 strands-agents
 strands-agents-tools
 mcp
+Pillow
+rich>=13.7.0
+rich-pixels

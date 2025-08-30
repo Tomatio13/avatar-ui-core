@@ -109,6 +109,20 @@ import settings
 from rich.markdown import Markdown
 from rich.console import Group
 from rich.text import Text
+try:
+    from rich.image import Image as RichImage  # Rich >= 13.3 + Pillow が必要
+    RICH_IMAGE_AVAILABLE = True
+except Exception:
+    RichImage = None  # type: ignore
+    RICH_IMAGE_AVAILABLE = False
+
+# rich-pixels（ピクセルレンダリング）
+try:
+    from rich_pixels import Pixels  # type: ignore
+    RICH_PIXELS_AVAILABLE = True
+except Exception:
+    Pixels = None  # type: ignore
+    RICH_PIXELS_AVAILABLE = False
 
 
 class LLMProvider:
@@ -494,42 +508,95 @@ class ChatHistory(RichLog):
 
 
 class AvatarArt(Static):
-    """ASCII Artによるアバター表示"""
+    """アバター表示（PNG優先・フォールバックでASCII）"""
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.current_state = "idle"
         self.ascii_cache = {}  # キャッシュでパフォーマンス向上
         self._initialized = False  # 初期化フラグ
+        self._last_width = None
+        self.render_mode = "unknown"  # 'image' | 'ascii_magic' | 'fallback'
+        self.last_error: str | None = None
         
-    def _generate_ascii_art(self, state: str) -> str:
-        """ASCII Artを生成"""
-        if not ASCII_MAGIC_AVAILABLE:
-            return self._get_fallback_ascii(state)
-            
-        # キャッシュをチェック
-        if state in self.ascii_cache:
-            return self.ascii_cache[state]
-            
+    def _image_cols(self) -> int:
         try:
-            # 画像ファイルパス
-            image_path = f"./static/images/{settings.AVATAR_IMAGE_IDLE if state == 'idle' else settings.AVATAR_IMAGE_TALK}"
-            
-            if not Path(image_path).exists():
-                return self._get_fallback_ascii(state)
-                
-            # AsciiArt.from_image()でオブジェクト作成
-            my_art = AsciiArt.from_image(image_path)
-            
-            # to_ascii()でモノクロ文字列を取得
-            ascii_output = my_art.to_ascii(columns=50, monochrome=False)
-                
-            # キャッシュに保存
-            self.ascii_cache[state] = ascii_output
-            return ascii_output
-            
-        except Exception as e:
-            return self._get_fallback_ascii(state)
+            # パネル幅に応じて調整（最低20、最大60）
+            width = self.size.width or 40
+            return max(20, min(60, int(width) - 4))
+        except Exception:
+            return 40
+
+    def _generate_renderable(self, state: str):
+        """PNGがあればRichのImageで表示。無ければASCIIにフォールバック"""
+        # 画像ファイルパス
+        image_path = f"./static/images/{settings.AVATAR_IMAGE_IDLE if state == 'idle' else settings.AVATAR_IMAGE_TALK}"
+
+        # まずPNG表示（rich.image）を試す
+        if RICH_IMAGE_AVAILABLE and Path(image_path).exists():
+            try:
+                cols = self._image_cols()
+                self.render_mode = "image"
+                self.last_error = None
+                return RichImage.from_file(image_path, width=cols)
+            except Exception:
+                # Pillow 未導入などのケースはASCIIへ
+                import traceback
+                self.last_error = traceback.format_exc(limit=1)
+
+        # rich-pixels があればそれを試す（より互換性の高いピクセル描画）
+        if RICH_PIXELS_AVAILABLE and Path(image_path).exists():
+            try:
+                # メソッド名の互換対応
+                make = getattr(Pixels, "from_image_path", None) or getattr(Pixels, "from_image", None)
+                if make is None:
+                    raise RuntimeError("rich-pixels API not found")
+                # from_image は PIL.Image を受け取る可能性がある
+                if make.__name__ == "from_image":
+                    try:
+                        from PIL import Image as PILImage  # type: ignore
+                        img = PILImage.open(image_path)
+                        # 横幅をざっくり合わせる（列数に近づける）
+                        cols = self._image_cols()
+                        w, h = img.size
+                        if w > 0:
+                            new_w = max(20, min(120, cols * 2))
+                            new_h = max(10, int(h * (new_w / w)))
+                            img = img.resize((new_w, new_h))
+                        renderable = Pixels.from_image(img)
+                    except Exception:
+                        renderable = make(image_path)  # type: ignore[arg-type]
+                else:
+                    renderable = make(image_path)  # type: ignore[misc]
+                self.render_mode = "image"
+                self.last_error = None
+                return renderable
+            except Exception:
+                import traceback
+                self.last_error = traceback.format_exc(limit=1)
+
+        # ASCII Magic があればそれを使う
+        if ASCII_MAGIC_AVAILABLE:
+            try:
+                if state in self.ascii_cache:
+                    self.render_mode = "ascii_magic"
+                    self.last_error = None
+                    return Text.from_ansi(self.ascii_cache[state])
+                my_art = AsciiArt.from_image(image_path) if Path(image_path).exists() else None
+                ascii_output = (
+                    my_art.to_ascii(columns=50, monochrome=False) if my_art else self._get_fallback_ascii(state)
+                )
+                self.ascii_cache[state] = ascii_output
+                self.render_mode = "ascii_magic"
+                self.last_error = None
+                return Text.from_ansi(ascii_output)
+            except Exception:
+                import traceback
+                self.last_error = traceback.format_exc(limit=1)
+
+        # 最終フォールバック（固定ASCII）
+        self.render_mode = "fallback"
+        return Text.from_ansi(self._get_fallback_ascii(state))
     
     def _get_fallback_ascii(self, state: str) -> str:
         """フォールバック用ASCII アート"""
@@ -555,16 +622,13 @@ class AvatarArt(Static):
             """
     
     def set_state(self, state: str):
-        """状態変更とアート更新"""
-        # 初回または状態が変更された場合に更新
-        if not self._initialized or self.current_state != state:
+        """状態変更と画像/ASCIIの更新"""
+        if not self._initialized or self.current_state != state or self._last_width != self.size.width:
             self.current_state = state
-            ascii_art = self._generate_ascii_art(state)
-            # Rich.TextのANSI変換機能を使用してフルカラー表示
-            from rich.text import Text
-            text = Text.from_ansi(ascii_art)
-            self.update(text)
+            renderable = self._generate_renderable(state)
+            self.update(renderable)
             self._initialized = True
+            self._last_width = self.size.width
             
 
 class AvatarDisplay(Container):
@@ -742,9 +806,31 @@ class TerminalChatApp(App):
                 mcp_status = f"✓ ({connected} connected / {configured} configured)"
             else:
                 mcp_status = "✗"
+
+            # アバター描画モード（image/ascii）も表示して診断しやすく
+            avatar_display = self.query_one("#avatar-display", AvatarDisplay)
+            render_mode = (
+                avatar_display.avatar_widget.render_mode
+                if avatar_display and getattr(avatar_display, "avatar_widget", None)
+                else "unknown"
+            )
+            mode_label = {
+                "image": "image",
+                "ascii_magic": "ascii",
+                "fallback": "ascii",
+            }.get(render_mode, "unknown")
             
+            extra = ""
+            if mode_label != "image":
+                err = (
+                    avatar_display.avatar_widget.last_error
+                    if avatar_display and getattr(avatar_display, "avatar_widget", None)
+                    else None
+                )
+                if err:
+                    extra = " (image fallback)"
             chat_history.add_system_message(
-                f"{settings.AVATAR_FULL_NAME} オンライン | LLM: {provider_name} | MCP: {mcp_status}"
+                f"{settings.AVATAR_FULL_NAME} オンライン | LLM: {provider_name} | MCP: {mcp_status} | Avatar: {mode_label}{extra}"
             )
             
         except Exception as e:
