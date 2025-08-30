@@ -87,10 +87,7 @@ class LogSuppressor:
             pass  # クリーンアップエラーは無視
 
 # LangChain imports（Strands互換性のため維持）
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
+# LangChain 依存は削除（Strands モデルのみ使用）
 
 try:
     from ascii_magic import AsciiArt
@@ -152,47 +149,97 @@ class LLMProvider:
     """LLMプロバイダの管理クラス"""
     
     def __init__(self):
-        self.llm = None
+        self.model = None  # Strands 用モデル
         self.mcp_clients = {}
         # 実際に接続が成功したMCPサーバ名一覧（UI表示用）
         self.mcp_active_servers = []
         self.strands_agent = None
-        self._initialize_llm()
+        self._initialize_model()
         self._initialize_strands_mcp()
     
-    def _initialize_llm(self):
-        """LLMプロバイダの初期化"""
+    def _initialize_model(self):
+        """Strands モデルの初期化（.env の LLM_PROVIDER に準拠）"""
         try:
-            llm_config = settings.get_current_llm_config()
-            provider = settings.LLM_PROVIDER
-            
-            if provider == 'google-genai':
-                self.llm = ChatGoogleGenerativeAI(
-                    model=llm_config['model'],
-                    google_api_key=llm_config['api_key'],
-                    temperature=0.7
+            provider_env = settings.LLM_PROVIDER
+            # OpenAI 互換（OpenAI / LiteLLM / Ollama）
+            if provider_env in ("openai", "openai-compatible", "ollama"):
+                client_args: dict[str, object] = {}
+                model_id: str
+                if provider_env == 'openai':
+                    if os.getenv("OPENAI_API_KEY"):
+                        client_args["api_key"] = os.getenv("OPENAI_API_KEY")
+                    if os.getenv("OPENAI_BASE_URL"):
+                        client_args["base_url"] = os.getenv("OPENAI_BASE_URL")
+                    model_id = os.getenv("OPENAI_MODEL", "gpt-4o")
+                elif provider_env == 'openai-compatible':
+                    key = os.getenv("OPENAI_COMPAT_API_KEY") or os.getenv("OPENAI_API_KEY")
+                    if key:
+                        client_args["api_key"] = key
+                    if os.getenv("OPENAI_COMPAT_BASE_URL"):
+                        client_args["base_url"] = os.getenv("OPENAI_COMPAT_BASE_URL")
+                    model_id = os.getenv("OPENAI_COMPAT_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o"))
+                else:  # ollama
+                    client_args["api_key"] = os.getenv("OLLAMA_API_KEY", "ollama")
+                    client_args["base_url"] = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+                    model_id = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+
+                self.model = OpenAIModel(
+                    client_args=client_args,
+                    model_id=model_id,
+                    params={"max_tokens": 1000, "temperature": 0.7},
                 )
-            elif provider == 'openai':
-                self.llm = ChatOpenAI(
-                    model=llm_config['model'],
-                    api_key=llm_config['api_key'],
-                    temperature=0.7
-                )
-            elif provider == 'anthropic':
-                self.llm = ChatAnthropic(
-                    model=llm_config['model'],
-                    api_key=llm_config['api_key'],
-                    temperature=0.7
-                )
-            else:
-                raise ValueError(f"Unsupported LLM provider: {provider}")
-                
-            # デバッグ情報は削除（ログ非表示化）
-            
+                return
+
+            # Anthropic（Strands AnthropicModel があれば利用）
+            if provider_env == 'anthropic':
+                try:
+                    from strands.models.anthropic import AnthropicModel as _AnthropicModel  # type: ignore
+                    if os.getenv("ANTHROPIC_API_KEY"):
+                        self.model = _AnthropicModel(
+                            client_args={"api_key": os.getenv("ANTHROPIC_API_KEY")},
+                            model_id=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
+                            params={"max_tokens": 1000, "temperature": 0.7},
+                        )
+                        return
+                except Exception:
+                    pass
+
+            # Google/Gemini（対応モデルがあれば利用）
+            if provider_env == 'google-genai':
+                for mod_name, cls_name in [
+                    ("strands.models.google", "GoogleModel"),
+                    ("strands.models.gemini", "GeminiModel"),
+                    ("strands.models.google_ai", "GoogleAIModel"),
+                ]:
+                    try:
+                        mod = __import__(mod_name, fromlist=[cls_name])
+                        GoogleModel = getattr(mod, cls_name)
+                        if os.getenv("GEMINI_API_KEY"):
+                            self.model = GoogleModel(
+                                client_args={"api_key": os.getenv("GEMINI_API_KEY")},
+                                model_id=os.getenv("MODEL_NAME"),
+                                params={"max_tokens": 1000, "temperature": 0.7},
+                            )
+                            return
+                    except Exception:
+                        continue
+
+            # 上記で作れない場合は、OpenAI 互換にフォールバック（あれば）
+            ca = {}
+            key = os.getenv("OPENAI_COMPAT_API_KEY") or os.getenv("OPENAI_API_KEY")
+            if key:
+                ca["api_key"] = key
+            if os.getenv("OPENAI_COMPAT_BASE_URL"):
+                ca["base_url"] = os.getenv("OPENAI_COMPAT_BASE_URL")
+            elif os.getenv("OPENAI_BASE_URL"):
+                ca["base_url"] = os.getenv("OPENAI_BASE_URL")
+            model_id = os.getenv("OPENAI_COMPAT_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o"))
+            if ca:
+                self.model = OpenAIModel(client_args=ca, model_id=model_id, params={"max_tokens": 1000, "temperature": 0.7})
+
         except Exception as e:
-            # ログにのみ記録（UIには出さない）
-            logging.getLogger(__name__).debug("Failed to initialize LLM provider: %s", e)
-            raise
+            logging.getLogger(__name__).debug("Failed to initialize Strands model: %s", e)
+            self.model = None
     
     def _initialize_strands_mcp(self):
         """Strands Agent MCPクライアントの初期化"""
@@ -237,17 +284,9 @@ class LLMProvider:
                             logging.getLogger(__name__).debug("Failed to initialize MCP server '%s': %s", server_name, e)
                             continue
                 
-                # OpenAIModel（Strands用）の初期化
-                model_openai = OpenAIModel(
-                    client_args={
-                        "api_key": os.getenv("OPENAI_API_KEY"),
-                    },
-                    model_id="gpt-4o",
-                    params={
-                        "max_tokens": 1000,
-                        "temperature": 0.7,
-                    }
-                )
+                # ここではモデルは作らない。_initialize_model で作成済みの self.model を必ず再利用する
+                if self.model is None:
+                    raise ValueError("Strandsモデルが初期化されていません (.env を確認してください)")
                 
                 # 公式ドキュメントに従い、複数のMCPクライアントのツールを統合
                 all_tools = []
@@ -283,11 +322,10 @@ class LLMProvider:
                                 logging.getLogger(__name__).debug("Failed to load tools from %s: %s", server_name, e)
                     
                     # Strands Agentの作成（統合されたツールを使用）
-                    if all_tools:
-                        self.strands_agent = Agent(
-                            model=model_openai,
-                            tools=all_tools
-                        )
+                    # すでに初期化済みの Strands モデルを利用
+                    agent_model = self.model
+                    if all_tools and agent_model is not None:
+                        self.strands_agent = Agent(model=agent_model, tools=all_tools)
                         logging.getLogger(__name__).debug("Created agent with %d total tools", len(all_tools))
                     else:
                         raise ValueError("MCPツールの取得に失敗しました")
@@ -302,9 +340,8 @@ class LLMProvider:
             self.mcp_active_servers = []
     
     async def generate_response(self, message: str) -> str:
-        """メッセージに対する応答を生成（Strands Agent対応）"""
+        """メッセージに対する応答を生成（Strands Agent前提）"""
         try:
-            # Strands Agent対応の場合
             if self.strands_agent and self.mcp_clients:
                 # Textual描画を維持するためstderrのみ抑止
                 with LogSuppressor(stdout=False, stderr=True):
@@ -348,27 +385,16 @@ class LLMProvider:
                                 response += text
                             first_event = False
                         return response.strip() if response else "応答を生成できませんでした"
-            
-            # Strands非対応の場合は直接LLMを使用
-            elif self.llm:
-                # システムプロンプトを含むメッセージ
-                messages = [
-                    HumanMessage(content=f"{settings.SYSTEM_INSTRUCTION} User: {message}")
-                ]
-                response = await self.llm.ainvoke(messages)
-                return response.content
-            
             else:
-                return "エラー: LLMプロバイダが初期化されていません"
+                return "MCPクライアントへの接続に失敗しました"
                 
         except Exception as e:
             error_msg = f"応答生成中にエラーが発生しました: {str(e)}"
             return error_msg
     
     async def generate_response_stream(self, message: str):
-        """Strands Agentによる真のストリーミング応答を生成"""
+        """Strands Agentによる真のストリーミング応答を生成（Strands前提）"""
         try:
-            # Strands Agent対応の場合
             if self.strands_agent and self.mcp_clients:
                 # 複数のMCPクライアントを同時使用（公式ドキュメント方式）
                 from contextlib import ExitStack
@@ -384,13 +410,7 @@ class LLMProvider:
                             logging.getLogger(__name__).debug("Skip client %s due to enter error: %s", name, e)
                             continue
                     if active_clients == 0:
-                        # 何も開けなければ通常LLMで代替
-                        async def _fallback_stream():
-                            messages = [HumanMessage(content=f"{settings.SYSTEM_INSTRUCTION} User: {message}")]
-                            result = await self.llm.ainvoke(messages) if self.llm else None
-                            yield (result.content if result else "応答を生成できませんでした")
-                        async for chunk in _fallback_stream():
-                            yield chunk
+                        yield "MCPクライアントへの接続に失敗しました"
                         return
                     
                     # Strands Agentのストリーミングを直接使用
@@ -417,28 +437,7 @@ class LLMProvider:
                             # 以降はUI描画を維持するため抑止解除済み
                             yield text
                         first_event = False
-            
-            # Strands非対応の場合はフォールバック
-            elif self.llm:
-                response = await self.generate_response(message)
-                
-                # 文字単位でストリーミングを模擬
-                buffer = ""
-                for char in response:
-                    buffer += char
-                    # 単語区切りまたは句読点でチャンクを送信
-                    if char in [' ', '。', '、', ' ', '.', ',', '!', '?']:
-                        if buffer.strip():
-                            yield buffer
-                            buffer = ""
-                
-                # 残りのバッファがあれば送信
-                if buffer.strip():
-                    yield buffer
-            
-            else:
-                yield "エラー: LLMプロバイダが初期化されていません"
-                
+        
         except Exception as e:
             error_msg = f"ストリーミング中にエラーが発生しました: {str(e)}"
             logging.getLogger(__name__).debug("%s", error_msg)

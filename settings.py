@@ -145,12 +145,23 @@ MCP_ENABLED = len(MCP_SERVERS) > 0 and os.getenv('MCP_ENABLED', 'True').lower() 
 # LLMプロバイダー設定
 # ===========================================
 
-# 使用するLLMプロバイダー（google-genai, openai, anthropic）
+# 使用するLLMプロバイダー（google-genai, openai, anthropic, ollama, openai-compatible）
 LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'google-genai')
 
-# 各プロバイダー用のAPIキー（必要に応じて設定）
+# 各プロバイダー用のAPIキー・接続設定（必要に応じて設定）
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL')  # 任意: 公式OpenAIでも指定可
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+
+# OpenAI互換（LiteLLM, 単独サーバ, Ollamaの/v1など）
+OPENAI_COMPAT_API_KEY = os.getenv('OPENAI_COMPAT_API_KEY', os.getenv('OPENAI_API_KEY'))
+OPENAI_COMPAT_BASE_URL = os.getenv('OPENAI_COMPAT_BASE_URL')
+OPENAI_COMPAT_MODEL = os.getenv('OPENAI_COMPAT_MODEL', os.getenv('OPENAI_MODEL', 'gpt-4o'))
+
+# Ollama（OpenAI互換エンドポイント /v1 を利用）
+OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434/v1')
+OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3.1:8b')
+OLLAMA_API_KEY = os.getenv('OLLAMA_API_KEY', 'ollama')  # 未使用でもOK
 
 # LLMプロバイダー別モデル設定
 LLM_MODELS = {
@@ -160,12 +171,25 @@ LLM_MODELS = {
     },
     'openai': {
         'model': os.getenv('OPENAI_MODEL', 'gpt-4o'),
-        'api_key': OPENAI_API_KEY
+        'api_key': OPENAI_API_KEY,
+        'base_url': OPENAI_BASE_URL,
     },
     'anthropic': {
         'model': os.getenv('ANTHROPIC_MODEL', 'claude-3-5-sonnet-20241022'),
         'api_key': ANTHROPIC_API_KEY
-    }
+    },
+    # Ollama は OpenAI 互換の /v1 エンドポイントを利用
+    'ollama': {
+        'model': OLLAMA_MODEL,
+        'api_key': OLLAMA_API_KEY,
+        'base_url': OLLAMA_BASE_URL,
+    },
+    # LiteLLM などの OpenAI 互換 API
+    'openai-compatible': {
+        'model': OPENAI_COMPAT_MODEL,
+        'api_key': OPENAI_COMPAT_API_KEY,
+        'base_url': OPENAI_COMPAT_BASE_URL,
+    },
 }
 
 # MCPエージェント設定
@@ -177,7 +201,10 @@ def get_current_llm_config():
         raise ValueError(f"Unsupported LLM provider: {LLM_PROVIDER}")
     
     config = LLM_MODELS[LLM_PROVIDER]
-    if not config['api_key']:
-        raise ValueError(f"API key not configured for provider: {LLM_PROVIDER}")
+    # 一部プロバイダー（ollama など）はAPIキー不要の場合もあるため、
+    # base_url と model の存在を優先確認。api_key は任意扱い。
+    if LLM_PROVIDER in ('openai', 'openai-compatible'):
+        if not config.get('api_key'):
+            raise ValueError(f"API key not configured for provider: {LLM_PROVIDER}")
     
     return config
