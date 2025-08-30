@@ -69,6 +69,13 @@ MCP_SERVERS_JSON='{
 
 LLM プロバイダ別キー例（必要に応じて設定）:
 
+プロバイダ別設定凡例（要点）
+- `google-genai`: 必須 `GEMINI_API_KEY`, モデル `MODEL_NAME`
+- `openai`: 必須 `OPENAI_API_KEY`, モデル `OPENAI_MODEL`（任意、既定 `gpt-4o`）, 任意 `OPENAI_BASE_URL`
+- `anthropic`: 必須 `ANTHROPIC_API_KEY`, モデル `ANTHROPIC_MODEL`
+- `ollama`: 必須 `OLLAMA_BASE_URL`（既定 `http://localhost:11434/v1`）, モデル `OLLAMA_MODEL`（例 `llama3.1:8b`）
+- `openai-compatible`（LiteLLM 等）: 必須 `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_API_KEY`, モデル `OPENAI_COMPAT_MODEL`
+
 ```dotenv
 # OpenAI を使う場合
 LLM_PROVIDER=openai
@@ -132,7 +139,7 @@ python terminal_app_strands.py
   - `openai`: `OPENAI_MODEL` と `OPENAI_API_KEY`（任意で `OPENAI_BASE_URL`）
   - `openai-compatible`: `OPENAI_COMPAT_MODEL` と `OPENAI_COMPAT_API_KEY`（`OPENAI_COMPAT_BASE_URL`）
   - `ollama`: `OLLAMA_MODEL` と `OLLAMA_BASE_URL`（APIキーは未使用でも可）
-  - 上記以外（`google-genai` / `anthropic`）の場合、OpenAI 互換の情報が `.env` に無いと MCP は無効になり、通常の LLM 応答にフォールバックします。
+  - 上記以外（`google-genai` / `anthropic`）の場合、環境に対応 Strands モデルが無く、かつ OpenAI 互換の情報も `.env` に無い場合は MCP を利用できず、接続失敗メッセージとなります。
 
 ## MCP について
 - 複数サーバのツールを起動時に統合し、Strands Agent に渡します
