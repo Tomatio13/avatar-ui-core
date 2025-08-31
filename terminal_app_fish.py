@@ -146,6 +146,15 @@ except Exception:
     PySoundManager = None  # type: ignore
     SOUND_AVAILABLE = False
 
+# Boids 表示（FISH モード用）
+try:
+    from boids_textual import BoidsWidget, BoidsParams  # type: ignore
+    BOIDS_AVAILABLE = True
+except Exception:
+    BoidsWidget = None  # type: ignore
+    BoidsParams = None  # type: ignore
+    BOIDS_AVAILABLE = False
+
 
 class LLMProvider:
     """LLMプロバイダの管理クラス"""
@@ -868,6 +877,7 @@ class AvatarDisplay(Container):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.avatar_widget = None
+        self.boids_widget = None
         self._anim_task = None
         self._talking = False
     
@@ -875,12 +885,31 @@ class AvatarDisplay(Container):
         """アバター表示コンポーネント構築"""
         yield Static(f"[b green]{settings.AVATAR_NAME.upper()}[/]", classes="avatar-label")
 
-        # アバター本体（センタリング用のコンテナに内包）
-        self.avatar_widget = AvatarArt(id="avatar-art", classes="avatar-art")
-        if CenterContainer:
-            yield CenterContainer(self.avatar_widget, id="avatar-center")
+        # モードに応じて表示を切替
+        if settings.AVATAR_MODE == 'FISH' and BOIDS_AVAILABLE:
+            # Boids を生成（指定の初期値。tank_w/h は自動フィットにする）
+            params = BoidsParams(
+                max_speed=3.2,
+                max_force=0.10,
+                align_radius=12.0,
+                cohere_radius=14.0,
+                separate_radius=7.0,
+                count=100,
+                tank_w=None,
+                tank_h=None,
+                restitution=0.95,
+            )
+            self.boids_widget = BoidsWidget(params, draw_border=False, id="boids")
+            self.boids_widget.fps_target = 15.0
+            # FISH では中央寄せせず、そのまま伸縮
+            yield Container(self.boids_widget, id="avatar-center")
         else:
-            yield Container(self.avatar_widget, classes="avatar-center")
+            # アバター本体（センタリング用のコンテナに内包）
+            self.avatar_widget = AvatarArt(id="avatar-art", classes="avatar-art")
+            if CenterContainer:
+                yield CenterContainer(self.avatar_widget, id="avatar-center")
+            else:
+                yield Container(self.avatar_widget, classes="avatar-center")
         # スペクトラムは AvatarDisplay 内には置かない（親側でレイアウト）
     
     def on_mount(self):
@@ -905,6 +934,10 @@ class AvatarDisplay(Container):
                 pass
             finally:
                 self._anim_task = None
+
+        # FISH モードでは口パクは行わない
+        if settings.AVATAR_MODE == 'FISH':
+            return
 
         if talking:
             # 口パクアニメーション開始
@@ -1000,12 +1033,12 @@ class TerminalChatApp(App):
         width: 100%;
         align: center top;         /* 子要素を上寄せ */
         content-align: center top;
-        height: auto;              /* 画像サイズ分だけに縮む */
+        height: auto;              /* 画像サイズ分だけに縮む（PIC時） */
         margin-bottom: 0;
         padding-bottom: 0;
     }
 
-    /* AvatarDisplay 自体も縮むように */
+    /* AvatarDisplay 自体も縮むように（PIC時） */
     #avatar-display {
         height: auto;
         content-align: center top;
@@ -1053,7 +1086,14 @@ class TerminalChatApp(App):
     }
     
 
-    """
+    """ + (
+        """
+        /* FISH モードでは Boids をできるだけ広く表示 */
+        #avatar-display { height: 1fr; }
+        .avatar-center, #avatar-center { height: 1fr; align: center middle; content-align: center middle; }
+        #boids { width: 100%; height: 1fr; }
+        """ if settings.AVATAR_MODE == 'FISH' else ""
+    )
     
     BINDINGS = [
         Binding("q", "quit", "終了"),
@@ -1111,28 +1151,31 @@ class TerminalChatApp(App):
             else:
                 mcp_status = "✗"
 
-            # アバター描画モード（image/ascii）も表示して診断しやすく
+            # アバター描画モード（image/ascii/boids）を表示
             avatar_display = self.query_one("#avatar-display", AvatarDisplay)
-            render_mode = (
-                avatar_display.avatar_widget.render_mode
-                if avatar_display and getattr(avatar_display, "avatar_widget", None)
-                else "unknown"
-            )
-            mode_label = {
-                "image": "image",
-                "ascii_magic": "ascii",
-                "fallback": "ascii",
-            }.get(render_mode, "unknown")
-            
-            extra = ""
-            if mode_label != "image":
-                err = (
-                    avatar_display.avatar_widget.last_error
+            if settings.AVATAR_MODE == 'FISH':
+                mode_label = "boids"
+                extra = ""
+            else:
+                render_mode = (
+                    avatar_display.avatar_widget.render_mode
                     if avatar_display and getattr(avatar_display, "avatar_widget", None)
-                    else None
+                    else "unknown"
                 )
-                if err:
-                    extra = " (image fallback)"
+                mode_label = {
+                    "image": "image",
+                    "ascii_magic": "ascii",
+                    "fallback": "ascii",
+                }.get(render_mode, "unknown")
+                extra = ""
+                if mode_label != "image":
+                    err = (
+                        avatar_display.avatar_widget.last_error
+                        if avatar_display and getattr(avatar_display, "avatar_widget", None)
+                        else None
+                    )
+                    if err:
+                        extra = " (image fallback)"
             chat_history.add_system_message(
                 f"{settings.AVATAR_FULL_NAME} オンライン | LLM: {provider_name} | MCP: {mcp_status} | Avatar: {mode_label}{extra}"
             )

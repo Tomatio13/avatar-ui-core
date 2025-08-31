@@ -28,6 +28,7 @@ AVATAR_NAME = os.getenv('AVATAR_NAME', 'Spectra')
 AVATAR_FULL_NAME = os.getenv('AVATAR_FULL_NAME', 'Spectra Communicator')
 AVATAR_IMAGE_IDLE = os.getenv('AVATAR_IMAGE_IDLE', 'idle.png')
 AVATAR_IMAGE_TALK = os.getenv('AVATAR_IMAGE_TALK', 'talk.png')
+AVATAR_MODE = os.getenv('AVATAR_MODE', 'PIC').upper()  # PIC または FISH
 
 # AI性格設定（AVATAR_NAMEに依存）
 SYSTEM_INSTRUCTION = os.getenv(
