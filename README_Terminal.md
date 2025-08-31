@@ -1,7 +1,7 @@
 # ターミナル版チャット UI（Textual）
 
-本ドキュメントは、`terminal_app_strands.py` を使ったターミナル UI 版の起動・設定方法を日本語でまとめたものです。複数 LLM（Gemini / OpenAI / Anthropic / Ollama / OpenAI互換API）と、複数 MCP サーバ（SSE / stdio）を統合して利用できます。
-また、画像アバター表示（Rich Image / rich-pixels）と ASCII フォールバック、タイプ音（任意）やスラッシュコマンドにも対応しています。
+本ドキュメントは、`terminal_app_strands.py` / `terminal_app_fish.py` を使ったターミナル UI 版の起動・設定方法を日本語でまとめたものです。複数 LLM（Gemini / OpenAI / Anthropic / Ollama / OpenAI互換API）と、複数 MCP サーバ（SSE / stdio）を統合して利用できます。
+また、アバター表示として PNG 表示（PICモード）と Boids による魚群表示（FISHモード）に対応し、画像アバターの ASCII フォールバック、タイプ音（任意）やスラッシュコマンドにも対応しています。
 
 ## できること
 - Markdown でAI応答を表示（コードブロックやリストを綺麗に描画）
@@ -62,6 +62,13 @@ MCP_SERVERS_JSON='{
 }'
 ```
 
+アバターモード（PIC=PNG表示 / FISH=Boids表示）を選ぶには以下を追加します。
+
+```dotenv
+# アバターモード（PIC or FISH）
+AVATAR_MODE=PIC
+```
+
 - `transport` は `sse` もしくは `stdio` を指定できます。
   - `sse` の場合は `url` が必須
   - `stdio` の場合は `command`（必要なら `args`）を指定
@@ -105,17 +112,21 @@ UI関連の主な可変値:
 - `AVATAR_NAME`, `AVATAR_FULL_NAME`（アバター名）
 - `AVATAR_IMAGE_IDLE`, `AVATAR_IMAGE_TALK`（画像が無い場合は ASCII にフォールバック）
 - `TYPEWRITER_DELAY_MS`, `MOUTH_ANIMATION_INTERVAL_MS`（表示/口パク速度）
+- `AVATAR_MODE`（`PIC`/`FISH`）
 
 ## 起動方法
 ```bash
-# ターミナル UI を起動
+# ターミナル UI（通常）
 python terminal_app_strands.py
+
+# Boids 魚群表示を組み込み済みの UI（右パネルのアバター表示が PIC/FISH に対応）
+python terminal_app_fish.py
 ```
 起動時、上部に以下のようなステータスを表示します。
 - 例: `Shoebill Communicator オンライン | LLM: google-genai | MCP: ✓ (1 connected / 4 configured) | Avatar: image`
   - configured: .env に設定された MCP サーバ数
   - connected: 実際に接続できたサーバ数（ツールが取得できたもの）
-  - Avatar: `image`/`ascii`（画像が使えなければ自動で ASCII 表示）
+  - Avatar: `image`/`ascii`（PICモード）または `boids`（FISHモード）
 
 ## 使い方
 - 画面下部の入力欄にメッセージを入力して Enter
@@ -125,6 +136,26 @@ python terminal_app_strands.py
 スラッシュコマンド:
 - `/clear`: 画面をクリアして初期ステータスを再表示
 - `/mcp`: 利用可能な MCP ツール一覧を Markdown で表示（サーバ別にグルーピング）
+
+## FISH（Boids）モードについて
+FISH モードでは、右側のアバターパネルに Boids（魚群行動）を表示します。水槽の壁は描画しません。画面サイズに合わせて自動的に群れの行動領域がフィットします。
+
+初期パラメータ（組み込みの既定値）:
+- count: 100（コード側で設定）
+- fps: 15
+- align: 12, cohere: 14, separate: 7
+- max-speed: 3.2, max-force: 0.10
+- restitution: 0.95
+
+チャット状態との連動（アニメーションモード）:
+- idle: 待機時。ゆっくり散開、青系の色調
+- thinking: 送信直後〜応答開始前。中央に集まり渦巻く、黄系の脈動
+- answering: 応答ストリーム中。速度アップ＆整列強化、右方向へ流れる、緑系
+
+魚の数を増やす/減らす（調整方法）:
+- `terminal_app_fish.py` の Boids 初期化箇所で `BoidsParams(count=...)` を変更してください。
+  - 参照: `terminal_app_fish.py:891` 付近（`BoidsParams` の生成）
+- 画面のセル数が上限のため、同じセルに重なった魚は密度文字（*, ▓, █）として集約表示されます。
 
 ## LLM 切替
 - `.env` の `LLM_PROVIDER` を切り替えます
@@ -182,6 +213,8 @@ BEEP_VOLUME_END=0.01
 
 ## 主要ファイル
 - `terminal_app_strands.py`：ターミナル UI 本体（Strands + MCP + LLM 統合）
+- `terminal_app_fish.py`：PIC/FISH（Boids）対応 UI。本ドキュメントの FISH 節参照
+- `boids_textual.py`：Boids 表示ロジック（組み込み版）
 - `settings.py`：`.env` 読み込みと検証、MCP サーバ設定のパース
 - `.env`：環境変数による設定
  - `sound_manager.py`：タイプ音（任意機能、依存があれば自動有効化）

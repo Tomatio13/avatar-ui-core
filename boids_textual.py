@@ -22,7 +22,7 @@ class BoidsParams:
     align_radius: float = 10.0
     cohere_radius: float = 12.0
     separate_radius: float = 6.0
-    count: int = 120
+    count: int = 300
     tank_w: int | None = None   # 水槽幅（セル）
     tank_h: int | None = None   # 水槽高（セル）
     restitution: float = 1.0    # 壁反発係数（1.0=完全反射）
@@ -55,6 +55,16 @@ class BoidsWidget(Widget):
         self._off_y = 0
         self._tank_w = 1
         self._tank_h = 1
+        # 表示モード: idle / thinking / answering
+        self._mode: str = "idle"
+        # スムージング用の現在値（パラメータを滑らかに遷移）
+        self._cur_speed = params.max_speed
+        self._cur_force = params.max_force
+        self._cur_align_r = params.align_radius
+        self._cur_cohere_r = params.cohere_radius
+        self._cur_separate_r = params.separate_radius
+        # 時間（カラー演出などに使用）
+        self._time = time.perf_counter()
 
     # --- ライフサイクル ---
     def on_mount(self) -> None:
@@ -117,14 +127,63 @@ class BoidsWidget(Widget):
         self._init_flock()
         self.refresh()
 
+    # --- モード制御 ---
+    def set_mode(self, mode: str) -> None:
+        """描画/ダイナミクスの状態を切り替え。
+        - idle: ゆっくり、ばらけ気味
+        - thinking: 少し集まり、中央付近に漂う
+        - answering: 速め、揃って右へ流れる
+        """
+        m = mode.lower()
+        if m not in ("idle", "thinking", "answering"):
+            return
+        self._mode = m
+        # 即時リフレッシュ
+        self.refresh()
+
     # --- 物理更新（壁バウンド） ---
     def _tick(self) -> None:
         if self.paused or self.positions is None or self.velocities is None:
             return
 
+        self._time = time.perf_counter()
         pos = self.positions
         vel = self.velocities
         n = pos.shape[0]
+
+        # モードに応じたターゲット値
+        if self._mode == "idle":
+            tgt_speed = self.params.max_speed * 0.4
+            tgt_force = self.params.max_force * 0.7
+            tgt_align = self.params.align_radius * 0.7
+            tgt_cohere = self.params.cohere_radius * 0.8
+            tgt_separate = self.params.separate_radius * 1.4
+            bias_vec = np.array([0.0, 0.0])
+            bias_to_center = 0.0
+        elif self._mode == "thinking":
+            tgt_speed = self.params.max_speed * 0.5
+            tgt_force = self.params.max_force * 0.9
+            tgt_align = self.params.align_radius * 0.8
+            tgt_cohere = self.params.cohere_radius * 1.8
+            tgt_separate = self.params.separate_radius * 0.8
+            bias_vec = np.array([0.0, 0.0])
+            bias_to_center = 0.12
+        else:  # answering
+            tgt_speed = self.params.max_speed * 1.7
+            tgt_force = self.params.max_force * 1.6
+            tgt_align = self.params.align_radius * 2.0
+            tgt_cohere = self.params.cohere_radius * 0.9
+            tgt_separate = self.params.separate_radius * 1.0
+            bias_vec = np.array([0.20, 0.0])  # 右方向ドリフトを強く
+            bias_to_center = 0.0
+
+        # なめらかに遷移
+        lerp = 0.15
+        self._cur_speed = (1 - lerp) * self._cur_speed + lerp * tgt_speed
+        self._cur_force = (1 - lerp) * self._cur_force + lerp * tgt_force
+        self._cur_align_r = (1 - lerp) * self._cur_align_r + lerp * tgt_align
+        self._cur_cohere_r = (1 - lerp) * self._cur_cohere_r + lerp * tgt_cohere
+        self._cur_separate_r = (1 - lerp) * self._cur_separate_r + lerp * tgt_separate
 
         for i in range(n):
             p = pos[i]
@@ -137,34 +196,34 @@ class BoidsWidget(Widget):
             steer = np.zeros(2, dtype=np.float64)
 
             # Align
-            mask_a = dist < self.params.align_radius
+            mask_a = dist < self._cur_align_r
             if np.any(mask_a):
                 avg_v = vel[mask_a].mean(axis=0)
                 nv = np.linalg.norm(avg_v)
                 if nv > 0:
-                    desired = (avg_v / nv) * self.params.max_speed
+                    desired = (avg_v / nv) * self._cur_speed
                     s = desired - v
                     ns = np.linalg.norm(s)
-                    if ns > self.params.max_force:
-                        s = (s / ns) * self.params.max_force
+                    if ns > self._cur_force:
+                        s = (s / ns) * self._cur_force
                     steer += s
 
             # Cohere
-            mask_c = dist < self.params.cohere_radius
+            mask_c = dist < self._cur_cohere_r
             if np.any(mask_c):
                 center = pos[mask_c].mean(axis=0)
                 vec = center - p
                 nv = np.linalg.norm(vec)
                 if nv > 0:
-                    desired = (vec / nv) * self.params.max_speed
+                    desired = (vec / nv) * self._cur_speed
                     s = desired - v
                     ns = np.linalg.norm(s)
-                    if ns > self.params.max_force:
-                        s = (s / ns) * self.params.max_force
+                    if ns > self._cur_force:
+                        s = (s / ns) * self._cur_force
                     steer += s
 
             # Separate
-            mask_s = dist < self.params.separate_radius
+            mask_s = dist < self._cur_separate_r
             if np.any(mask_s):
                 diffs = p - pos[mask_s]
                 d = np.linalg.norm(diffs, axis=1, keepdims=True)
@@ -172,18 +231,46 @@ class BoidsWidget(Widget):
                 push = (diffs / d).mean(axis=0)
                 npv = np.linalg.norm(push)
                 if npv > 0:
-                    desired = (push / npv) * self.params.max_speed
+                    desired = (push / npv) * self._cur_speed
                     s = desired - v
                     ns = np.linalg.norm(s)
-                    if ns > self.params.max_force:
-                        s = (s / ns) * self.params.max_force
+                    if ns > self._cur_force:
+                        s = (s / ns) * self._cur_force
                     steer += s
+
+            # Thinking: 中央への弱いバイアス + 渦（周回）バイアス
+            if bias_to_center > 0.0:
+                center = np.array([self._tank_w * 0.5, self._tank_h * 0.5])
+                vec = center - p
+                nv = np.linalg.norm(vec)
+                if nv > 0:
+                    desired = (vec / nv) * self._cur_speed
+                    s = desired - v
+                    ns = np.linalg.norm(s)
+                    if ns > self._cur_force:
+                        s = (s / ns) * self._cur_force
+                    steer += s * bias_to_center
+                    # 渦: 中心方向ベクトルを90度回転させた接線方向
+                    tang = np.array([-vec[1], vec[0]])
+                    nv2 = np.linalg.norm(tang)
+                    if nv2 > 0:
+                        tang = tang / nv2
+                        steer += tang * (0.06 * self._cur_speed)
+
+            # Answering: 右向きのドリフト
+            if bias_vec[0] != 0.0 or bias_vec[1] != 0.0:
+                desired = bias_vec * self._cur_speed
+                s = desired - v
+                ns = np.linalg.norm(s)
+                if ns > self._cur_force:
+                    s = (s / ns) * self._cur_force
+                steer += 0.06 * s
 
             # 速度更新（クランプ）
             v += steer
             nv = np.linalg.norm(v)
-            if nv > self.params.max_speed:
-                v[:] = (v / nv) * self.params.max_speed
+            if nv > self._cur_speed:
+                v[:] = (v / nv) * self._cur_speed
 
             # 位置更新
             p += v
@@ -245,10 +332,40 @@ class BoidsWidget(Widget):
             for y in range(y0 + 1, y1):
                 put(y, x0, "|", border_style); put(y, x1, "|", border_style)
 
-        # 個体（色付き）
+        # 収録用: カラー計算ユーティリティ
+        def _rgb_to_hex(r: int, g: int, b: int) -> str:
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        def _clamp01(x: float) -> float:
+            return 0.0 if x < 0 else 1.0 if x > 1 else x
+
+        def _mode_color(idx: int, x: int, y: int, intensity: float = 1.0) -> str:
+            t = self._time
+            if self._mode == "idle":
+                # 青系で穏やかに明滅
+                base = np.array([80, 160, 255], dtype=float)
+                amp = 20.0
+                w = 0.8 + 0.2 * np.sin(0.9 * t + idx * 0.37)
+                col = (base * w + amp) * intensity
+            elif self._mode == "thinking":
+                # 黄系でパルス（考え中）
+                base = np.array([255, 215, 80], dtype=float)
+                pulse = 0.7 + 0.3 * np.sin(2.2 * t + (idx + x + y) * 0.15)
+                col = base * pulse * intensity
+            else:  # answering
+                # 緑系でスピード感（右側ほど明るく）
+                base = np.array([80, 255, 130], dtype=float)
+                boost = 0.7 + 0.3 * _clamp01(x / max(1, W))
+                col = base * boost * intensity
+            col = np.clip(col, 0, 255).astype(int)
+            return _rgb_to_hex(int(col[0]), int(col[1]), int(col[2]))
+
+        # 個体（色付き）: セル毎に密度集約して可視差を出す
         if self.positions is not None:
             pts = self.positions.astype(int)
             glyphs = (">", "<", "^", "v")
+            # (sx,sy) -> {count, vx, vy}
+            occ: dict[tuple[int, int], list[float]] = {}
             for idx, ((px, py), v) in enumerate(zip(pts, self.velocities)):
                 if self.draw_border:
                     sx = x0 + 1 + px
@@ -257,13 +374,36 @@ class BoidsWidget(Widget):
                     sx = x0 + px
                     sy = y0 + py
                 if 0 <= sx < W and 0 <= sy < H:
-                    if abs(v[0]) >= abs(v[1]):
-                        ch = glyphs[0] if v[0] >= 0 else glyphs[1]
+                    key = (sx, sy)
+                    if key in occ:
+                        occ[key][0] += 1.0
+                        occ[key][1] += float(v[0])
+                        occ[key][2] += float(v[1])
                     else:
-                        ch = glyphs[2] if v[1] < 0 else glyphs[3]
+                        occ[key] = [1.0, float(v[0]), float(v[1])]
 
-                    color_style = (self.boid_colors[idx] if self.boid_colors is not None else None)
-                    put(sy, sx, ch, color_style)
+            for (sx, sy), acc in occ.items():
+                cnt, vx, vy = acc
+                cnt_i = int(cnt)
+                # 方向（単体時のみ向き文字、複数時は密度文字）
+                if self._mode == "answering":
+                    ch = ">"
+                elif cnt_i <= 1:
+                    if abs(vx) >= abs(vy):
+                        ch = glyphs[0] if vx >= 0 else glyphs[1]
+                    else:
+                        ch = glyphs[2] if vy < 0 else glyphs[3]
+                elif cnt_i <= 3:
+                    ch = "*"
+                elif cnt_i <= 6:
+                    ch = "▓"
+                else:
+                    ch = "█"
+
+                # 密度に応じて明るさを上げる（上限あり）
+                intensity = 0.8 + 0.25 * min(cnt, 8.0) / 8.0
+                color_style = _mode_color(sy * W + sx, sx, sy, intensity=float(intensity))
+                put(sy, sx, ch, color_style)
 
         # バッファ→Text（スタイルのラン長圧縮で高速化）
         for y in range(H):
@@ -283,9 +423,8 @@ class BoidsWidget(Widget):
             txt.append("\n")
 
         status = (
-            f" Boids: {self.params.count} | FPS: {self._fps_measured:4.1f} | "
-            f"Tank: {self._tank_w}x{self._tank_h} | "
-            f"[space]=pause  r=reset  +/-=count  q=quit "
+            f" Mode: {self._mode} | Boids: {self.params.count} | FPS: {self._fps_measured:4.1f} | "
+            f"Tank: {self._tank_w}x{self._tank_h} | [space]=pause  r=reset  +/-=count  q=quit "
         )
         txt.append(status)
         return txt

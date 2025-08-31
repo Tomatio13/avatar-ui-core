@@ -894,7 +894,7 @@ class AvatarDisplay(Container):
                 align_radius=12.0,
                 cohere_radius=14.0,
                 separate_radius=7.0,
-                count=100,
+                count=300,
                 tank_w=None,
                 tank_h=None,
                 restitution=0.95,
@@ -917,6 +917,12 @@ class AvatarDisplay(Container):
         if self.avatar_widget:
             # 初期状態でアバターを表示
             self.avatar_widget.set_state("idle")
+        # FISH 初期モード
+        if self.boids_widget and hasattr(self.boids_widget, "set_mode"):
+            try:
+                self.boids_widget.set_mode("idle")
+            except Exception:
+                pass
             
     def set_talking(self, talking: bool):
         """発話状態の変更"""
@@ -935,8 +941,13 @@ class AvatarDisplay(Container):
             finally:
                 self._anim_task = None
 
-        # FISH モードでは口パクは行わない
+        # FISH モードでは口パクは行わず、モード切替のみ
         if settings.AVATAR_MODE == 'FISH':
+            if self.boids_widget and hasattr(self.boids_widget, "set_mode"):
+                try:
+                    self.boids_widget.set_mode("answering" if talking else "idle")
+                except Exception:
+                    pass
             return
 
         if talking:
@@ -956,6 +967,14 @@ class AvatarDisplay(Container):
             # 停止時は必ずidleに戻す
             if self.avatar_widget:
                 self.avatar_widget.set_state("idle")
+
+    # FISH専用: 思考中モード
+    def set_thinking(self):
+        if settings.AVATAR_MODE == 'FISH' and self.boids_widget and hasattr(self.boids_widget, "set_mode"):
+            try:
+                self.boids_widget.set_mode("thinking")
+            except Exception:
+                pass
 
 
 class ChatInput(Input):
@@ -1248,6 +1267,14 @@ class TerminalChatApp(App):
                     chat_history.add_system_message("MCPツールは見つかりませんでした")
                 return
 
+        # 思考中モード（FISH）に切り替え
+        try:
+            avatar_display = self.query_one("#avatar-display", AvatarDisplay)
+            if avatar_display and hasattr(avatar_display, "set_thinking"):
+                avatar_display.set_thinking()
+        except Exception:
+            pass
+
         # 画面更新を強制して確実にユーザー入力を表示
         self.refresh()
         # より長い待機時間でUI更新を確実にする
@@ -1287,6 +1314,7 @@ class TerminalChatApp(App):
                 if not started_talk:
                     # 実際にテキストが届いたタイミングで口パク開始
                     avatar_display.set_talking(True)
+                    # FISH の場合は answering モードに（set_talkingが内部で切替）
                     started_talk = True
                 response_buffer += chunk
                 chat_history.update_streaming(response_buffer)
